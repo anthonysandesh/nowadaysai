@@ -1,37 +1,43 @@
-import path from "node:path";
-import { pathToFileURL } from "node:url";
-
-import { PDFParse } from "pdf-parse";
-
-let workerConfigured = false;
-
-function ensurePdfWorkerConfigured() {
-  if (workerConfigured) {
-    return;
-  }
-
-  const workerFsPath = path.resolve(
-    process.cwd(),
-    "node_modules",
-    "pdf-parse",
-    "dist",
-    "worker",
-    "pdf.worker.mjs",
-  );
-
-  PDFParse.setWorker(pathToFileURL(workerFsPath).toString());
-  workerConfigured = true;
-}
+// lib/pdf.ts
+// Node-safe PDF text extraction using pdfjs-dist legacy build (avoids DOMMatrix/browser APIs)
 
 export async function extractTextFromPdfBytes(bytes: Uint8Array): Promise<string> {
-  ensurePdfWorkerConfigured();
+  // ✅ Dynamic import so Next doesn't evaluate pdfjs at bundle/module load time
+  const pdfjs: any = await import("pdfjs-dist/legacy/build/pdf.mjs");
 
-  const parser = new PDFParse({ data: bytes });
+  const getDocument =
+    pdfjs.getDocument ?? pdfjs.default?.getDocument;
+
+  if (typeof getDocument !== "function") {
+    throw new Error(
+      "pdfjs-dist legacy build did not expose getDocument(). Check pdfjs-dist version.",
+    );
+  }
+
+  const loadingTask = getDocument({
+    data: bytes,
+    disableWorker: true, // serverless/Next route friendly
+  });
 
   try {
-    const result = await parser.getText();
-    return result.text ?? "";
+    const doc = await loadingTask.promise;
+
+    let out = "";
+    for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
+      const page = await doc.getPage(pageNum);
+      const content = await page.getTextContent();
+
+      out += content.items
+        .map((item: any) => (typeof item?.str === "string" ? item.str : ""))
+        .join(" ")
+        .trim();
+
+      out += "\n";
+    }
+
+    return out.trim();
   } finally {
-    await parser.destroy().catch(() => undefined);
+    // pdf.js recommends destroying the loading task
+    await loadingTask.destroy?.().catch(() => undefined);
   }
 }
