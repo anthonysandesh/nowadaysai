@@ -7,6 +7,7 @@ import {
 } from "@/lib/quote-parser";
 import type { ParseQuoteOutput } from "@/lib/quote-parser";
 import { enrichFromMarriottLinks } from "@/lib/marriott-enrichment";
+import { extractTextFromPdfBytes } from "@/lib/pdf";
 import {
   emptyParsedFields,
   ParseApiResponse,
@@ -16,7 +17,6 @@ import {
 import { isSupabaseConfigured, saveParsedQuote } from "@/lib/supabase";
 
 export const runtime = "nodejs";
-
 const NO_TOTALS_WARNING = "No required totals were detected in this input.";
 
 interface ParsedSource {
@@ -28,11 +28,7 @@ function inferFormatFromFile(file: File): RawContentFormat {
   const fileName = file.name.toLowerCase();
   const mime = file.type.toLowerCase();
 
-  if (
-    fileName.endsWith(".html") ||
-    fileName.endsWith(".htm") ||
-    mime.includes("html")
-  ) {
+  if (fileName.endsWith(".html") || fileName.endsWith(".htm") || mime.includes("html")) {
     return "html";
   }
 
@@ -41,29 +37,19 @@ function inferFormatFromFile(file: File): RawContentFormat {
 
 async function extractPdfText(file: File): Promise<string> {
   const bytes = new Uint8Array(await file.arrayBuffer());
-
-  // ✅ Lazy-load the PDF extractor so route module evaluation doesn't crash
-  const { extractTextFromPdfBytes } = await import("@/lib/pdf");
-  return await extractTextFromPdfBytes(bytes);
+  return extractTextFromPdfBytes(bytes);
 }
 
 function hasDetectedAnyField(output: ParseQuoteOutput): boolean {
-  return QUOTE_FIELD_ORDER.some(
-    (fieldKey) => output.fields[fieldKey].value !== null,
-  );
+  return QUOTE_FIELD_ORDER.some((fieldKey) => output.fields[fieldKey].value !== null);
 }
 
-function mergeMissingFields(
-  primary: ParseQuoteOutput,
-  fallback: ParseQuoteOutput,
-): ParseQuoteOutput {
+function mergeMissingFields(primary: ParseQuoteOutput, fallback: ParseQuoteOutput): ParseQuoteOutput {
   const mergedFields = emptyParsedFields();
 
   for (const fieldKey of QUOTE_FIELD_ORDER) {
     mergedFields[fieldKey] =
-      primary.fields[fieldKey].value !== null
-        ? primary.fields[fieldKey]
-        : fallback.fields[fieldKey];
+      primary.fields[fieldKey].value !== null ? primary.fields[fieldKey] : fallback.fields[fieldKey];
   }
 
   const mergedWarnings = hasDetectedAnyField({ ...primary, fields: mergedFields })
@@ -93,12 +79,14 @@ async function applyLinkedProposalEnrichment(
   const mergedOutput = mergeMissingFields(output, enrichmentResult.enrichment.parsed);
   const addedField = QUOTE_FIELD_ORDER.some(
     (fieldKey) =>
-      output.fields[fieldKey].value === null &&
-      mergedOutput.fields[fieldKey].value !== null,
+      output.fields[fieldKey].value === null && mergedOutput.fields[fieldKey].value !== null,
   );
 
   if (!addedField) {
-    return { output, extraWarnings: [] };
+    return {
+      output,
+      extraWarnings: [],
+    };
   }
 
   return {
@@ -142,7 +130,9 @@ export async function POST(request: Request) {
 
   if (!pastedContent.trim() && fileInputs.length === 0) {
     return NextResponse.json(
-      { error: "Add pasted content or upload at least one file." },
+      {
+        error: "Add pasted content or upload at least one file.",
+      },
       { status: 400 },
     );
   }
@@ -193,13 +183,8 @@ export async function POST(request: Request) {
 
   if (pastedContent.trim()) {
     const parsed = parseQuoteContent(pastedContent, pastedFormat);
-    const enriched = await applyLinkedProposalEnrichment(parsed, [
-      pastedContent,
-      parsed.normalizedText,
-    ]);
-    results.push(
-      await buildResult("Pasted Content", "pasted", enriched.output, enriched.extraWarnings),
-    );
+    const enriched = await applyLinkedProposalEnrichment(parsed, [pastedContent, parsed.normalizedText]);
+    results.push(await buildResult("Pasted Content", "pasted", enriched.output, enriched.extraWarnings));
   }
 
   for (const file of fileInputs) {
